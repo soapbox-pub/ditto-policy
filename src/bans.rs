@@ -172,6 +172,7 @@ mod tests {
         Event {
             id: "00".repeat(32),
             pubkey: pubkey.into(),
+            created_at: 0,
             kind,
             tags: vec![],
             content: content.into(),

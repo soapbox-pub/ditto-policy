@@ -7,24 +7,27 @@
 //! rather than held back until stdin closes.
 //!
 //! Its subcommands ban Concord Communities: see [`ban`]. The plugin refuses
-//! what the bans in its database cover.
+//! what the bans in its database cover, and, with `--flood-similar-authors`
+//! or `--flood-mention-authors`, floods of root notes: see [`flood`].
 
 mod ban;
 mod bans;
 mod concord;
 mod fetch;
+mod flood;
 mod labels;
 mod nostr;
 mod policy;
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
 use bans::Bans;
-use policy::{Input, Verdict};
+use policy::{Floods, Input, Verdict};
 
 #[derive(Parser)]
 #[command(about, long_about = None)]
@@ -37,6 +40,14 @@ struct Cli {
         global = true
     )]
     db: PathBuf,
+    /// Refuse a root note when this many other accounts posted one like it
+    /// within ten minutes. 0 doesn't.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    flood_similar_authors: usize,
+    /// Refuse a root note when an account it mentions was mentioned by this
+    /// many other accounts within ten minutes. 0 doesn't.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    flood_mention_authors: usize,
     /// Without one, run as the plugin.
     #[command(subcommand)]
     command: Option<Command>,
@@ -80,9 +91,20 @@ fn main() -> anyhow::Result<()> {
                 bans: None,
                 failed: false,
             };
-            run(io::stdin().lock(), io::stdout().lock(), &mut |event| {
-                plugin.banned(event)
-            })?;
+            let mut floods =
+                (cli.flood_similar_authors > 0 || cli.flood_mention_authors > 0).then(|| {
+                    Floods::new(flood::Options {
+                        similar_authors: cli.flood_similar_authors,
+                        mention_authors: cli.flood_mention_authors,
+                        ..Default::default()
+                    })
+                });
+            run(
+                io::stdin().lock(),
+                io::stdout().lock(),
+                &mut |event| plugin.banned(event),
+                floods.as_mut(),
+            )?;
         }
         Some(Command::Ban { list: true, .. }) => ban::list(&cli.db)?,
         Some(Command::Ban {
@@ -134,6 +156,7 @@ fn run(
     mut input: impl BufRead,
     mut output: impl Write,
     banned: &mut impl FnMut(&policy::Event) -> bool,
+    mut floods: Option<&mut Floods>,
 ) -> io::Result<()> {
     let mut line = String::new();
     loop {
@@ -141,7 +164,7 @@ fn run(
         if input.read_line(&mut line)? == 0 {
             return output.flush();
         }
-        if let Some(answer) = answer(line.trim_end(), banned) {
+        if let Some(answer) = answer(line.trim_end(), banned, floods.as_deref_mut()) {
             serde_json::to_writer(&mut output, &answer)?;
             output.write_all(b"\n")?;
         }
@@ -160,7 +183,11 @@ struct Output {
     msg: String,
 }
 
-fn answer(line: &str, banned: &mut impl FnMut(&policy::Event) -> bool) -> Option<Output> {
+fn answer(
+    line: &str,
+    banned: &mut impl FnMut(&policy::Event) -> bool,
+    floods: Option<&mut Floods>,
+) -> Option<Output> {
     if line.is_empty() {
         return None;
     }
@@ -188,7 +215,10 @@ fn answer(line: &str, banned: &mut impl FnMut(&policy::Event) -> bool) -> Option
     let verdict = if banned(&input.event) {
         Verdict::Reject("blocked: banned by this relay's operator".into())
     } else {
-        policy::judge(&input)
+        match (policy::judge(&input), floods) {
+            (Verdict::Accept, Some(floods)) => floods.judge(&input.event, now()),
+            (verdict, _) => verdict,
+        }
     };
     let (action, msg) = match verdict {
         Verdict::Accept => ("accept", String::new()),
@@ -201,6 +231,13 @@ fn answer(line: &str, banned: &mut impl FnMut(&policy::Event) -> bool) -> Option
     })
 }
 
+/// Milliseconds since the epoch.
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,9 +245,12 @@ mod tests {
     fn run_lines(input: &str) -> Vec<serde_json::Value> {
         let mut out = Vec::new();
         let banned = "dd".repeat(32);
-        run(input.as_bytes(), &mut out, &mut |event: &policy::Event| {
-            event.pubkey == banned
-        })
+        run(
+            input.as_bytes(),
+            &mut out,
+            &mut |event: &policy::Event| event.pubkey == banned,
+            None,
+        )
         .unwrap();
         String::from_utf8(out)
             .unwrap()

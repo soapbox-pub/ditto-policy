@@ -422,6 +422,7 @@ mod tests {
         policy::Event {
             id: "00".repeat(32),
             pubkey: pubkey.into(),
+            created_at: 0,
             kind: 1,
             tags: vec![],
             content: String::new(),

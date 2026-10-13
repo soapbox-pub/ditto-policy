@@ -131,6 +131,7 @@ mod tests {
         let event = Event {
             id: "00".repeat(32),
             pubkey: "bb".repeat(32),
+            created_at: 0,
             kind: 30030,
             tags: tags
                 .iter()

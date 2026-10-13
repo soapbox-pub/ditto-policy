@@ -7,6 +7,7 @@ description = "Write policy plugin for strfry and Ditto Relay"
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
+bech32 = "0.11"
 chacha20 = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 heed = { version = "0.22", default-features = false }
@@ -15,6 +16,7 @@ hkdf = "0.12"
 hmac = "0.12"
 # The crypto provider tungstenite's TLS uses; with only this one compiled in,
 # rustls picks it without being told.
+regex = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 secp256k1 = { version = "0.30", features = ["global-context"] }
 serde = { version = "1.0.229", features = ["derive"] }

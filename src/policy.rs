@@ -2,6 +2,8 @@
 
 use serde::Deserialize;
 
+use crate::flood;
+
 /// strfry's input message. Only what the policy looks at is read.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -13,6 +15,8 @@ pub struct Input {
 pub struct Event {
     pub id: String,
     pub pubkey: String,
+    #[serde(default)]
+    pub created_at: u64,
     pub kind: u64,
     #[serde(default)]
     pub tags: Vec<Vec<String>>,
@@ -79,6 +83,35 @@ pub fn judge(input: &Input) -> Verdict {
     Verdict::Accept
 }
 
+/// Floods of root notes, refused when asked: see [`flood`].
+pub struct Floods {
+    detector: flood::Detector,
+    /// How old a note may be, in seconds, and still be judged.
+    window: u64,
+}
+
+impl Floods {
+    pub fn new(options: flood::Options) -> Self {
+        Floods {
+            window: options.window_ms / 1000,
+            detector: flood::Detector::new(options),
+        }
+    }
+
+    /// Judge an event, received at `now`, in milliseconds since the epoch.
+    pub fn judge(&mut self, event: &Event, now: u64) -> Verdict {
+        // Only notes written within the window: a flood is many accounts
+        // posting at once, and imports and backfills deliver old notes in
+        // bursts that would look like one.
+        if (now / 1000).abs_diff(event.created_at) <= self.window
+            && let Some(rule) = self.detector.check(event, now)
+        {
+            return Verdict::Reject(format!("blocked: {}", rule.reason()));
+        }
+        Verdict::Accept
+    }
+}
+
 /// Whether any `t` tag is an NSFW hashtag, in any case.
 fn has_nsfw_hashtag(tags: &[Vec<String>]) -> bool {
     tags.iter().any(|tag| match tag.as_slice() {
@@ -121,11 +154,51 @@ mod tests {
             event: Event {
                 id: "00".repeat(32),
                 pubkey: "bb".repeat(32),
+                created_at: 0,
                 kind,
                 tags: vec![],
                 content: content.into(),
             },
         }
+    }
+
+    fn mentioning(n: u64, pubkey: &str, created_at: u64) -> Event {
+        let mut event = event(1, "").event;
+        event.id = format!("{n:064x}");
+        event.pubkey = format!("{n:f>64x}");
+        event.created_at = created_at;
+        event.tags = vec![vec!["p".into(), pubkey.into()]];
+        event
+    }
+
+    #[test]
+    fn blocks_floods_of_fresh_notes_only() {
+        let mut floods = Floods::new(flood::Options {
+            similar_authors: 0,
+            mention_authors: 2,
+            ..Default::default()
+        });
+        let target = "a".repeat(64);
+        let now = 1_800_000_000_000;
+        // Old notes, as an import sends, are neither judged nor remembered.
+        for n in 1..=5 {
+            assert_eq!(
+                floods.judge(&mentioning(n, &target, 1_700_000_000), now),
+                Verdict::Accept
+            );
+        }
+        assert_eq!(
+            floods.judge(&mentioning(6, &target, now / 1000), now),
+            Verdict::Accept
+        );
+        assert_eq!(
+            floods.judge(&mentioning(7, &target, now / 1000 - 60), now),
+            Verdict::Accept
+        );
+        assert_eq!(
+            floods.judge(&mentioning(8, &target, now / 1000), now),
+            Verdict::Reject(format!("blocked: {}", flood::Rule::Mentions.reason()))
+        );
     }
 
     fn tagged(kind: u64, tags: &[&[&str]]) -> Input {
