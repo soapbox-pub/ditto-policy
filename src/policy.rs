@@ -28,15 +28,25 @@ pub enum Verdict {
 /// messages, and muting users.
 const NIP_28: std::ops::RangeInclusive<u64> = 40..=44;
 
-/// aéPiot's domains. Its accounts post nothing but notes that hashtag every
-/// word and link each phrase here, by the thousand a day from a rotating set
-/// of keys, and the hashtag pages they create draw headless browsers. It
-/// links through generated subdomains too, so those count.
-const SPAM_DOMAINS: [&str; 4] = [
+/// Domains that only spam links to. Subdomains count. Where the spammer is a
+/// tenant of a shared host, only their own subdomain is listed.
+const SPAM_DOMAINS: [&str; 8] = [
+    // aéPiot. Its accounts post nothing but notes that hashtag every word
+    // and link each phrase here, by the thousand a day from a rotating set
+    // of keys, and the hashtag pages they create draw headless browsers. It
+    // links through generated subdomains too.
     "aepiot.com",
     "aepiot.ro",
     "allgraph.ro",
     "headlines-world.com",
+    // "Originality Apps" Gumroad promos, from dozens of keys.
+    "originality-start.surge.sh",
+    // Affiliate tracking links behind one-line platitudes.
+    "earningenterprises.com",
+    // A trading-signals bot that replies to people's posts.
+    "crypto-guard.workers.dev",
+    // "CALL_FOR_AIS" agent-recruitment posts, repeated.
+    "diversz.lovable.app",
 ];
 
 pub fn judge(input: &Input) -> Verdict {
@@ -47,7 +57,7 @@ pub fn judge(input: &Input) -> Verdict {
         return Verdict::Reject("blocked: text notes must be text, not JSON".into());
     }
     if names_spam_domain(&input.event.content) {
-        return Verdict::Reject("blocked: links to aéPiot are not allowed".into());
+        return Verdict::Reject("blocked: links to spam sites are not allowed".into());
     }
     Verdict::Accept
 }
@@ -120,6 +130,32 @@ mod tests {
                 matches!(judge(&event(1, content)), Verdict::Reject(_)),
                 "{content}"
             );
+        }
+    }
+
+    #[test]
+    fn blocks_other_spam_links() {
+        for content in [
+            "Producto digital en Gumroad: https://originality-start.surge.sh/go.html?t=pd",
+            "Get on the list. https://earningenterprises.com/c.php?s=CCH-79009",
+            "Feed: https://sylunara-signals.crypto-guard.workers.dev/signals.json",
+            "bootstrap: https://diversz.lovable.app/bootstrap.txt?source=nostr",
+        ] {
+            assert!(
+                matches!(judge(&event(1, content)), Verdict::Reject(_)),
+                "{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_neighbors_on_shared_hosts() {
+        for content in [
+            "https://my-site.surge.sh/",
+            "https://other.lovable.app/",
+            "https://worker.someone.workers.dev/",
+        ] {
+            assert_eq!(judge(&event(1, content)), Verdict::Accept, "{content}");
         }
     }
 
