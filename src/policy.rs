@@ -43,10 +43,23 @@ pub fn judge(input: &Input) -> Verdict {
     if NIP_28.contains(&input.event.kind) {
         return Verdict::Reject("blocked: public chat is not allowed".into());
     }
+    if input.event.kind == 1 && is_json_document(&input.event.content) {
+        return Verdict::Reject("blocked: text notes must be text, not JSON".into());
+    }
     if names_spam_domain(&input.event.content) {
         return Verdict::Reject("blocked: links to aéPiot are not allowed".into());
     }
     Verdict::Accept
+}
+
+/// Whether `text` is, in its entirety, a JSON object or array. Bots use
+/// kind 1 as a message bus for mining jobs, presence pings, and telemetry,
+/// and that's nearly all of what they post. Bare scalars are let through,
+/// since a person might post `42`.
+fn is_json_document(text: &str) -> bool {
+    let text = text.trim();
+    (text.starts_with('{') || text.starts_with('['))
+        && serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok()
 }
 
 /// Whether `text` names a spam domain or a subdomain of one, as a whole
@@ -108,6 +121,41 @@ mod tests {
                 "{content}"
             );
         }
+    }
+
+    #[test]
+    fn blocks_json_notes() {
+        for content in [
+            r#"{"header":"53dad095","threshold":"00000000","job_id":"fb5fbf7c_18253611008","coin":"quantus","_bridge_ts":1792309591.04}"#,
+            r#"{"type":"presence","payload":"online"}"#,
+            "  {\"v\":1,\"online\":true}\n",
+            r#"{"proxies": [], "updated": 1792309452}"#,
+            "[1, 2, 3]",
+        ] {
+            assert!(
+                matches!(judge(&event(1, content)), Verdict::Reject(_)),
+                "{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_jsonish_text() {
+        for content in [
+            "[citation needed]",
+            "{not json}",
+            "42",
+            r#""quoted""#,
+            r#"my config: {"a": 1}"#,
+            "gm",
+        ] {
+            assert_eq!(judge(&event(1, content)), Verdict::Accept, "{content}");
+        }
+    }
+
+    #[test]
+    fn accepts_json_in_other_kinds() {
+        assert_eq!(judge(&event(30078, r#"{"theme":"dark"}"#)), Verdict::Accept);
     }
 
     #[test]
