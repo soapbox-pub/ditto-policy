@@ -13,6 +13,8 @@ pub struct Input {
 pub struct Event {
     pub id: String,
     pub kind: u64,
+    #[serde(default)]
+    pub tags: Vec<Vec<String>>,
     pub content: String,
 }
 
@@ -49,6 +51,14 @@ const SPAM_DOMAINS: [&str; 8] = [
     "diversz.lovable.app",
 ];
 
+/// Hashtags that mark an event as adult. Ditto Relay's defaults for its
+/// `nsfw:` search extension, where they only mark media; here any event
+/// carrying one is refused.
+const NSFW_HASHTAGS: [&str; 19] = [
+    "nsfw", "adult", "nude", "nudes", "nudity", "sex", "xxx", "onlyfans", "porn", "porno", "boobs",
+    "tits", "pussy", "cock", "milf", "slut", "fetish", "hentai", "loli",
+];
+
 pub fn judge(input: &Input) -> Verdict {
     if NIP_28.contains(&input.event.kind) {
         return Verdict::Reject("blocked: public chat is not allowed".into());
@@ -59,7 +69,20 @@ pub fn judge(input: &Input) -> Verdict {
     if names_spam_domain(&input.event.content) {
         return Verdict::Reject("blocked: links to spam sites are not allowed".into());
     }
+    if has_nsfw_hashtag(&input.event.tags) {
+        return Verdict::Reject("blocked: adult content is not allowed".into());
+    }
     Verdict::Accept
+}
+
+/// Whether any `t` tag is an NSFW hashtag, in any case.
+fn has_nsfw_hashtag(tags: &[Vec<String>]) -> bool {
+    tags.iter().any(|tag| match tag.as_slice() {
+        [name, value, ..] if name == "t" => NSFW_HASHTAGS
+            .iter()
+            .any(|nsfw| value.eq_ignore_ascii_case(nsfw)),
+        _ => false,
+    })
 }
 
 /// Whether `text` is, in its entirety, a JSON object or array. Bots use
@@ -94,8 +117,49 @@ mod tests {
             event: Event {
                 id: "00".repeat(32),
                 kind,
+                tags: vec![],
                 content: content.into(),
             },
+        }
+    }
+
+    fn tagged(kind: u64, tags: &[&[&str]]) -> Input {
+        let mut input = event(kind, "");
+        input.event.tags = tags
+            .iter()
+            .map(|tag| tag.iter().map(|s| s.to_string()).collect())
+            .collect();
+        input
+    }
+
+    #[test]
+    fn blocks_nsfw_hashtags() {
+        for tags in [
+            &[&["t", "nsfw"][..]][..],
+            &[&["t", "NSFW"]],
+            &[&["t", "cats"], &["t", "Hentai"]],
+        ] {
+            assert!(
+                matches!(judge(&tagged(1, tags)), Verdict::Reject(_)),
+                "{tags:?}"
+            );
+        }
+        assert!(matches!(
+            judge(&tagged(20, &[&["t", "porn"]])),
+            Verdict::Reject(_)
+        ));
+    }
+
+    #[test]
+    fn accepts_other_hashtags() {
+        for tags in [
+            &[&["t", "cats"][..]][..],
+            &[&["t", "sexy"]],
+            &[&["e", "nsfw"]],
+            &[&["content-warning", "nudity"]],
+            &[&["t"]],
+        ] {
+            assert_eq!(judge(&tagged(1, tags)), Verdict::Accept, "{tags:?}");
         }
     }
 
