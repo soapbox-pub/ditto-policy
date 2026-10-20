@@ -12,6 +12,7 @@ pub struct Input {
 #[derive(Debug, Deserialize)]
 pub struct Event {
     pub id: String,
+    pub pubkey: String,
     pub kind: u64,
     #[serde(default)]
     pub tags: Vec<Vec<String>>,
@@ -116,6 +117,7 @@ mod tests {
         Input {
             event: Event {
                 id: "00".repeat(32),
+                pubkey: "bb".repeat(32),
                 kind,
                 tags: vec![],
                 content: content.into(),
