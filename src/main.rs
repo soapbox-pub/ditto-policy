@@ -13,6 +13,7 @@ mod ban;
 mod bans;
 mod concord;
 mod fetch;
+mod labels;
 mod nostr;
 mod policy;
 

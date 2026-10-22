@@ -70,6 +70,9 @@ pub fn judge(input: &Input) -> Verdict {
     if names_spam_domain(&input.event.content) {
         return Verdict::Reject("blocked: links to spam sites are not allowed".into());
     }
+    if crate::labels::flagged(&input.event) {
+        return Verdict::Reject("blocked: this content is not allowed".into());
+    }
     if has_nsfw_hashtag(&input.event.tags) {
         return Verdict::Reject("blocked: adult content is not allowed".into());
     }
