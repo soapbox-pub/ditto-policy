@@ -55,11 +55,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Ban a Concord Community, given one of its invite links.
+    /// Ban a Concord Community, given one of its invite links, or people,
+    /// given their pubkeys.
     Ban {
         /// An invite link: …/invite/<naddr>#<fragment>.
-        #[arg(required_unless_present = "list")]
+        #[arg(required_unless_present_any = ["list", "pubkeys"])]
         link: Option<String>,
+        /// Ban this person on their own, from posting anything: a pubkey or
+        /// npub. Repeatable.
+        #[arg(long = "pubkey", value_name = "KEY", conflicts_with_all = ["link", "members", "relays"])]
+        pubkeys: Vec<String>,
         /// Ban everyone in the Community too, from posting anything.
         #[arg(long)]
         members: bool,
@@ -71,7 +76,7 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
         /// List the bans instead.
-        #[arg(long, conflicts_with_all = ["link", "members", "relays", "dry_run"])]
+        #[arg(long, conflicts_with_all = ["link", "pubkeys", "members", "relays", "dry_run"])]
         list: bool,
     },
     /// Lift bans: an invite link's or community id's Community's, members
@@ -107,6 +112,9 @@ fn main() -> anyhow::Result<()> {
             )?;
         }
         Some(Command::Ban { list: true, .. }) => ban::list(&cli.db)?,
+        Some(Command::Ban {
+            pubkeys, dry_run, ..
+        }) if !pubkeys.is_empty() => ban::ban_people(&cli.db, &pubkeys, dry_run)?,
         Some(Command::Ban {
             link,
             members,

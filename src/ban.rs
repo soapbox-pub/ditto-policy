@@ -19,6 +19,10 @@
 //!
 //! Everything is read from the link's relays, the Community's, and any
 //! given with `--relay`.
+//!
+//! `ditto-policy ban --pubkey <npub>` bans a person on their own, by no
+//! Community: lifting a Community's bans leaves theirs, and so does banning
+//! one they're in.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -289,12 +293,70 @@ fn ban_with(
     Ok(())
 }
 
+/// `ditto-policy ban --pubkey <key>…`: people, on their own.
+pub fn ban_people(db: &Path, keys: &[String], dry_run: bool) -> Result<()> {
+    ban_people_in(&Bans::open(db)?, keys, dry_run)
+}
+
+fn ban_people_in(bans: &Bans, keys: &[String], dry_run: bool) -> Result<()> {
+    let mut pubkeys = Vec::new();
+    for key in keys {
+        let pubkey = pubkey(key).ok_or_else(|| anyhow!("Not a pubkey or npub: {key}"))?;
+        if !pubkeys.contains(&pubkey) {
+            pubkeys.push(pubkey);
+        }
+    }
+    println!(
+        "{} {} pubkeys:",
+        if dry_run { "Would ban" } else { "Banning" },
+        pubkeys.len()
+    );
+    for pubkey in &pubkeys {
+        let was = match bans.get(pubkey)? {
+            Some(Ban {
+                role: Role::Person, ..
+            }) => "  already banned on their own",
+            Some(Ban {
+                role: Role::Member, ..
+            }) => "  already banned as a member",
+            Some(_) => "  already banned as a Community's address",
+            None => "",
+        };
+        println!("  {}{was}", hex::encode(pubkey));
+    }
+    if dry_run {
+        return Ok(());
+    }
+    let people: Vec<(Bytes32, Role)> = pubkeys.iter().map(|pk| (*pk, Role::Person)).collect();
+    bans.ban(&people, &[0; 32])?;
+    println!("Banned. Events already stored are left as they are.");
+    Ok(())
+}
+
+/// A hex pubkey or an npub.
+fn pubkey(key: &str) -> Option<Bytes32> {
+    let hex = match nostr::nip19_decode(key.trim()) {
+        Some(Decoded::Npub(pubkey)) => pubkey,
+        _ => key.trim().to_lowercase(),
+    };
+    bytes32(&hex)
+}
+
 /// `ditto-policy ban --list`.
 pub fn list(db: &Path) -> Result<()> {
-    let mut bans = Bans::open(db)?.list()?;
+    let bans = Bans::open(db)?.list()?;
     if bans.is_empty() {
         println!("Nothing is banned.");
         return Ok(());
+    }
+    let (mut people, mut bans): (Vec<Ban>, Vec<Ban>) =
+        bans.into_iter().partition(|ban| ban.role == Role::Person);
+    people.sort_by_key(|ban| (ban.at, ban.pubkey));
+    if !people.is_empty() {
+        println!("People:");
+    }
+    for ban in people {
+        println!("  {}  banned {}", hex::encode(ban.pubkey), date(ban.at));
     }
     bans.sort_by_key(|ban| (ban.community, ban.role as u8, ban.at, ban.pubkey));
     let mut community = None;
@@ -308,7 +370,7 @@ pub fn list(db: &Path) -> Result<()> {
             }
         }
         let role = match ban.role {
-            Role::Community => "",
+            Role::Community | Role::Person => "",
             Role::Member => "  member",
         };
         println!(
@@ -321,7 +383,8 @@ pub fn list(db: &Path) -> Result<()> {
 }
 
 /// `ditto-policy unban <target>`: an invite link or community id lifts its
-/// Community's bans, its members' included; a pubkey just its own.
+/// Community's bans, its members' included, but not people banned on their
+/// own; a pubkey just its own.
 pub fn unban(db: &Path, target: &str) -> Result<()> {
     let lifted = unban_from(&Bans::open(db)?, target)?;
     println!("Lifted {lifted} bans.");
@@ -332,7 +395,7 @@ fn unban_from(bans: &Bans, target: &str) -> Result<usize> {
     let all = bans.list()?;
     let of_community = |community: Bytes32| -> Vec<Bytes32> {
         all.iter()
-            .filter(|ban| ban.community == community)
+            .filter(|ban| community != [0; 32] && ban.community == community)
             .map(|ban| ban.pubkey)
             .collect()
     };
@@ -343,11 +406,7 @@ fn unban_from(bans: &Bans, target: &str) -> Result<usize> {
             _ => vec![signer],
         }
     } else {
-        let hex = match nostr::nip19_decode(target.trim()) {
-            Some(Decoded::Npub(pubkey)) => pubkey,
-            _ => target.trim().to_lowercase(),
-        };
-        let Some(key) = bytes32(&hex) else {
+        let Some(key) = pubkey(target) else {
             bail!("Not an invite link, community id, or pubkey: {target}")
         };
         match of_community(key) {
@@ -485,6 +544,35 @@ mod tests {
         // The link lifts the whole Community, members and all.
         let total = bans.list().unwrap().len();
         assert_eq!(unban_from(&bans, url).unwrap(), total);
+        assert!(bans.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn bans_a_person_on_their_own() {
+        let v = vectors();
+        let dir = tempfile::tempdir().unwrap();
+        let bans = Bans::open(dir.path()).unwrap();
+        let url = v["invite"]["url"].as_str().unwrap();
+        let alice = v["keys"]["alice"].as_str().unwrap();
+
+        assert!(ban_people_in(&bans, &["nonsense".into()], false).is_err());
+        ban_people_in(&bans, &[alice.into()], true).unwrap();
+        assert!(bans.list().unwrap().is_empty(), "a dry run changes nothing");
+
+        ban_people_in(&bans, &[alice.into(), alice.to_uppercase()], false).unwrap();
+        let list = bans.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].role, Role::Person);
+        assert!(bans.blocks(&by(alice)).unwrap());
+
+        // Alice is in the Community, but lifting it leaves her own ban.
+        ban_with(&bans, url, true, &[], false, relay).unwrap();
+        unban_from(&bans, url).unwrap();
+        assert_eq!(bans.list().unwrap().len(), 1);
+        assert!(bans.blocks(&by(alice)).unwrap());
+        assert_eq!(unban_from(&bans, &"00".repeat(32)).unwrap(), 0);
+
+        assert_eq!(unban_from(&bans, alice).unwrap(), 1);
         assert!(bans.list().unwrap().is_empty());
     }
 

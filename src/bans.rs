@@ -8,7 +8,8 @@
 //! |----------|--------|-----------------------------------------|
 //! | `banned` | pubkey | community id ‖ time (u32 BE) ‖ [`Role`] |
 //!
-//! A ban whose bundle couldn't be found has an all-zero community id.
+//! A ban whose bundle couldn't be found has an all-zero community id, as has
+//! a person's banned on their own.
 
 use std::path::Path;
 
@@ -30,6 +31,9 @@ pub enum Role {
     /// A person in it, banned with `--members`: their own key, for
     /// everything they post.
     Member = 1,
+    /// A person banned on their own, with `--pubkey`: by no Community, so
+    /// lifting one's bans leaves theirs.
+    Person = 2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +59,7 @@ impl Ban {
         let (at, rest) = rest.split_first_chunk::<4>()?;
         let role = match rest {
             [1] => Role::Member,
+            [2] => Role::Person,
             _ => Role::Community,
         };
         Some(Ban {
@@ -113,7 +118,8 @@ impl Bans {
         Ok(false)
     }
 
-    /// Ban `pubkeys` together, as `community`'s.
+    /// Ban `pubkeys` together, as `community`'s. A person already banned on
+    /// their own stays so.
     pub fn ban(&self, pubkeys: &[(Bytes32, Role)], community: &Bytes32) -> Result<()> {
         let at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -122,6 +128,14 @@ impl Bans {
             });
         let mut txn = self.env.write_txn()?;
         for &(pubkey, role) in pubkeys {
+            let own = self
+                .banned
+                .get(&txn, &pubkey)?
+                .and_then(|value| Ban::decode(&pubkey, value))
+                .is_some_and(|ban| ban.role == Role::Person);
+            if own && role != Role::Person {
+                continue;
+            }
             let ban = Ban {
                 pubkey,
                 community: *community,
@@ -217,5 +231,21 @@ mod tests {
         assert_eq!(bans.unban(&[concord::bytes32(signer).unwrap()]).unwrap(), 1);
         assert!(!bans.blocks(&event(signer, 1059, "")).unwrap());
         assert!(bans.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_community_ban_leaves_a_persons_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let bans = Bans::open(dir.path()).unwrap();
+        let alice = [0xaa; 32];
+        bans.ban(&[(alice, Role::Person)], &[0; 32]).unwrap();
+        bans.ban(&[(alice, Role::Member)], &[7; 32]).unwrap();
+        let ban = bans.get(&alice).unwrap().unwrap();
+        assert_eq!((ban.role, ban.community), (Role::Person, [0; 32]));
+
+        let bob = [0xbb; 32];
+        bans.ban(&[(bob, Role::Member)], &[7; 32]).unwrap();
+        bans.ban(&[(bob, Role::Person)], &[0; 32]).unwrap();
+        assert_eq!(bans.get(&bob).unwrap().unwrap().role, Role::Person);
     }
 }
