@@ -8,11 +8,15 @@
 //!
 //! Its subcommands ban Concord Communities: see [`ban`]. The plugin refuses
 //! what the bans in its database cover, and, with `--flood-similar-authors`
-//! or `--flood-mention-authors`, floods of root notes: see [`flood`].
+//! or `--flood-mention-authors`, floods of root notes: see [`flood`]. With
+//! moderation keys named in its config file, it applies Armada's blocklist
+//! of users too: see [`blocklist`].
 
 mod ban;
 mod bans;
+mod blocklist;
 mod concord;
+mod config;
 mod fetch;
 mod flood;
 mod labels;
@@ -27,6 +31,8 @@ use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
 use bans::Bans;
+use blocklist::Blocklist;
+use config::Config;
 use policy::{Floods, Input, Verdict};
 
 #[derive(Parser)]
@@ -40,6 +46,14 @@ struct Cli {
         global = true
     )]
     db: PathBuf,
+    /// The config file. Without one, the defaults.
+    #[arg(
+        long,
+        env = "DITTO_POLICY_CONFIG",
+        default_value = "/etc/ditto-policy.toml",
+        global = true
+    )]
+    config: PathBuf,
     /// Refuse a root note when this many other accounts posted one like it
     /// within ten minutes. 0 doesn't.
     #[arg(long, value_name = "N", default_value_t = 0)]
@@ -91,11 +105,18 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         None => {
+            // A bad config is reported, and the rest of the policy still runs.
+            let config = Config::load(&cli.config).unwrap_or_else(|err| {
+                eprintln!("ditto-policy: config not applied: {err:#}");
+                Config::default()
+            });
             let mut plugin = Plugin {
                 db: cli.db,
                 bans: None,
                 failed: false,
+                blocklist: None,
             };
+            plugin.start_blocklist(&config);
             let mut floods =
                 (cli.flood_similar_authors > 0 || cli.flood_mention_authors > 0).then(|| {
                     Floods::new(flood::Options {
@@ -134,25 +155,48 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// The plugin's hold on the bans. The database is opened once there is
-/// one, so a relay started before the first ban picks it up.
+/// one, so a relay started before the first ban picks it up, or at once if
+/// the blocklist is applied, which keeps its entries there.
 struct Plugin {
     db: PathBuf,
     bans: Option<Bans>,
     failed: bool,
+    blocklist: Option<Blocklist>,
 }
 
 impl Plugin {
-    fn banned(&mut self, event: &policy::Event) -> bool {
-        if self.bans.is_none() && !self.failed && self.db.join("data.mdb").exists() {
-            match Bans::open(&self.db) {
-                Ok(bans) => self.bans = Some(bans),
-                Err(err) => {
-                    eprintln!("ditto-policy: bans not enforced: {err:#}");
-                    self.failed = true;
-                }
+    fn open(&mut self) {
+        match Bans::open(&self.db) {
+            Ok(bans) => self.bans = Some(bans),
+            Err(err) => {
+                eprintln!("ditto-policy: bans not enforced: {err:#}");
+                self.failed = true;
             }
         }
+    }
+
+    fn start_blocklist(&mut self, config: &Config) {
+        if config.blocklist.authors.is_empty() {
+            return;
+        }
+        self.open();
+        let Some(bans) = &self.bans else { return };
+        match Blocklist::start(&config.blocklist, bans) {
+            Ok(blocklist) => self.blocklist = blocklist,
+            Err(err) => eprintln!("ditto-policy: blocklist not applied: {err:#}"),
+        }
+    }
+
+    fn banned(&mut self, event: &policy::Event) -> bool {
+        if self.bans.is_none() && !self.failed && self.db.join("data.mdb").exists() {
+            self.open();
+        }
         let Some(bans) = &self.bans else { return false };
+        if let Some(blocklist) = &mut self.blocklist
+            && let Err(err) = blocklist.observe(bans, event)
+        {
+            eprintln!("ditto-policy: could not apply the blocklist: {err:#}");
+        }
         bans.blocks(event).unwrap_or_else(|err| {
             eprintln!("ditto-policy: could not read the bans: {err:#}");
             false

@@ -319,6 +319,10 @@ fn ban_people_in(bans: &Bans, keys: &[String], dry_run: bool) -> Result<()> {
             Some(Ban {
                 role: Role::Member, ..
             }) => "  already banned as a member",
+            Some(Ban {
+                role: Role::Blocklist,
+                ..
+            }) => "  already banned by the blocklist",
             Some(_) => "  already banned as a Community's address",
             None => "",
         };
@@ -349,6 +353,9 @@ pub fn list(db: &Path) -> Result<()> {
         println!("Nothing is banned.");
         return Ok(());
     }
+    let (mut listed, bans): (Vec<Ban>, Vec<Ban>) = bans
+        .into_iter()
+        .partition(|ban| ban.role == Role::Blocklist);
     let (mut people, mut bans): (Vec<Ban>, Vec<Ban>) =
         bans.into_iter().partition(|ban| ban.role == Role::Person);
     people.sort_by_key(|ban| (ban.at, ban.pubkey));
@@ -357,6 +364,18 @@ pub fn list(db: &Path) -> Result<()> {
     }
     for ban in people {
         println!("  {}  banned {}", hex::encode(ban.pubkey), date(ban.at));
+    }
+    listed.sort_by_key(|ban| (ban.at, ban.pubkey));
+    if !listed.is_empty() {
+        println!("People the Armada blocklist names:");
+    }
+    for ban in listed {
+        println!(
+            "  {}  banned {}  entry {}",
+            hex::encode(ban.pubkey),
+            date(ban.at),
+            hex::encode(ban.community)
+        );
     }
     bans.sort_by_key(|ban| (ban.community, ban.role as u8, ban.at, ban.pubkey));
     let mut community = None;
@@ -370,7 +389,7 @@ pub fn list(db: &Path) -> Result<()> {
             }
         }
         let role = match ban.role {
-            Role::Community | Role::Person => "",
+            Role::Community | Role::Person | Role::Blocklist => "",
             Role::Member => "  member",
         };
         println!(

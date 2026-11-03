@@ -4,12 +4,15 @@
 //! `ditto-policy ban` writes while the plugin runs, and the plugin refuses a
 //! banned pubkey's events from the moment the ban commits.
 //!
-//! | table    | key    | value                                   |
-//! |----------|--------|-----------------------------------------|
-//! | `banned` | pubkey | community id ‖ time (u32 BE) ‖ [`Role`] |
+//! | table       | key        | value                                     |
+//! |-------------|------------|-------------------------------------------|
+//! | `banned`    | pubkey     | community id ‖ time (u32 BE) ‖ [`Role`]   |
+//! | `blocklist` | entry hash | created_at (i64 BE) ‖ blocked (u8) ‖ id   |
 //!
 //! A ban whose bundle couldn't be found has an all-zero community id, as has
-//! a person's banned on their own.
+//! a person's banned on their own. A ban from the Armada blocklist has its
+//! entry's hash in place of a community id. `blocklist` holds the newest
+//! entry of each user the blocklist names (see [`crate::blocklist`]).
 
 use std::path::Path;
 
@@ -34,6 +37,9 @@ pub enum Role {
     /// A person banned on their own, with `--pubkey`: by no Community, so
     /// lifting one's bans leaves theirs.
     Person = 2,
+    /// A person an Armada blocklist entry names, recognized here: lifting
+    /// the entry lifts it.
+    Blocklist = 3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +66,7 @@ impl Ban {
         let role = match rest {
             [1] => Role::Member,
             [2] => Role::Person,
+            [3] => Role::Blocklist,
             _ => Role::Community,
         };
         Some(Ban {
@@ -74,6 +81,36 @@ impl Ban {
 pub struct Bans {
     env: Env<WithoutTls>,
     banned: Database<Bytes, Bytes>,
+    blocklist: Database<Bytes, Bytes>,
+}
+
+/// The newest blocklist entry for a user, as kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    pub created_at: i64,
+    pub blocked: bool,
+    pub id: Bytes32,
+}
+
+impl Entry {
+    fn encode(&self) -> Vec<u8> {
+        [
+            &self.created_at.to_be_bytes()[..],
+            &[u8::from(self.blocked)],
+            &self.id[..],
+        ]
+        .concat()
+    }
+
+    fn decode(value: &[u8]) -> Option<Entry> {
+        let (created_at, rest) = value.split_first_chunk::<8>()?;
+        let (&blocked, id) = rest.split_first()?;
+        Some(Entry {
+            created_at: i64::from_be_bytes(*created_at),
+            blocked: blocked == 1,
+            id: id.try_into().ok()?,
+        })
+    }
 }
 
 impl Bans {
@@ -87,14 +124,19 @@ impl Bans {
             EnvOpenOptions::new()
                 .read_txn_without_tls()
                 .map_size(MAP_SIZE)
-                .max_dbs(1)
+                .max_dbs(2)
                 .open(dir)
         }
         .with_context(|| format!("Could not open the database at {}", dir.display()))?;
         let mut txn = env.write_txn()?;
         let banned = env.create_database(&mut txn, Some("banned"))?;
+        let blocklist = env.create_database(&mut txn, Some("blocklist"))?;
         txn.commit()?;
-        Ok(Bans { env, banned })
+        Ok(Bans {
+            env,
+            banned,
+            blocklist,
+        })
     }
 
     /// Whether an event is one a ban keeps out: signed by a banned pubkey,
@@ -119,20 +161,16 @@ impl Bans {
     }
 
     /// Ban `pubkeys` together, as `community`'s. A person already banned on
-    /// their own stays so.
+    /// their own, or by the blocklist, stays so.
     pub fn ban(&self, pubkeys: &[(Bytes32, Role)], community: &Bytes32) -> Result<()> {
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| {
-                u32::try_from(since.as_secs()).unwrap_or(u32::MAX)
-            });
+        let at = now();
         let mut txn = self.env.write_txn()?;
         for &(pubkey, role) in pubkeys {
             let own = self
                 .banned
                 .get(&txn, &pubkey)?
                 .and_then(|value| Ban::decode(&pubkey, value))
-                .is_some_and(|ban| ban.role == Role::Person);
+                .is_some_and(|ban| matches!(ban.role, Role::Person | Role::Blocklist));
             if own && role != Role::Person {
                 continue;
             }
@@ -166,6 +204,57 @@ impl Bans {
         Ok(bans)
     }
 
+    /// Every blocklist entry kept, by its hash.
+    pub fn entries(&self) -> Result<Vec<(Bytes32, Entry)>> {
+        let txn = self.env.read_txn()?;
+        let mut entries = Vec::new();
+        for entry in self.blocklist.iter(&txn)? {
+            let (hash, value) = entry?;
+            if let (Ok(hash), Some(entry)) = (hash.try_into(), Entry::decode(value)) {
+                entries.push((hash, entry));
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Keep `entry` as the newest for `hash`.
+    pub fn put_entry(&self, hash: &Bytes32, entry: &Entry) -> Result<()> {
+        let mut txn = self.env.write_txn()?;
+        self.blocklist.put(&mut txn, hash, &entry.encode())?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Ban `pubkey` as the user blocklist entry `hash` names, unless it's
+    /// banned already. Whether it was banned now.
+    pub fn ban_blocklisted(&self, pubkey: &Bytes32, hash: &Bytes32) -> Result<bool> {
+        let mut txn = self.env.write_txn()?;
+        if self.banned.get(&txn, pubkey)?.is_some() {
+            return Ok(false);
+        }
+        let ban = Ban {
+            pubkey: *pubkey,
+            community: *hash,
+            at: now(),
+            role: Role::Blocklist,
+        };
+        self.banned.put(&mut txn, pubkey, &ban.encode())?;
+        txn.commit()?;
+        Ok(true)
+    }
+
+    /// Lift the bans entry `hash` made. Returns the pubkeys lifted.
+    pub fn unban_blocklisted(&self, hash: &Bytes32) -> Result<Vec<Bytes32>> {
+        let lifted: Vec<Bytes32> = self
+            .list()?
+            .into_iter()
+            .filter(|ban| ban.role == Role::Blocklist && ban.community == *hash)
+            .map(|ban| ban.pubkey)
+            .collect();
+        self.unban(&lifted)?;
+        Ok(lifted)
+    }
+
     /// Lift the bans on `pubkeys`. Returns how many there were.
     pub fn unban(&self, pubkeys: &[Bytes32]) -> Result<usize> {
         let mut txn = self.env.write_txn()?;
@@ -176,6 +265,14 @@ impl Bans {
         txn.commit()?;
         Ok(lifted)
     }
+}
+
+fn now() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u32::try_from(since.as_secs()).unwrap_or(u32::MAX)
+        })
 }
 
 #[cfg(test)]

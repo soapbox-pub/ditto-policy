@@ -1,0 +1,19 @@
+# ditto-policy's config, read from /etc/ditto-policy.toml (or --config, or
+# DITTO_POLICY_CONFIG) when the plugin starts. Every setting is optional, and
+# without the file the plugin does what it always has.
+
+[blocklist]
+# Apply Armada's blocklist of users: ban the people its entries (kind 37307,
+# scope "user") name, once met as an author or in a p tag, and delete what they
+# stored here. Moderation keys whose entries count, hex or npub. None, and the
+# blocklist isn't applied.
+authors = []
+
+# Where to read entries from when the plugin starts, and every refresh_minutes
+# after. Entries published to this relay are seen as they arrive regardless.
+relays = []
+refresh_minutes = 30
+
+# Run with {"authors":["<pubkey>"]} appended, to delete a banned user's events.
+# strfry's is ["strfry", "delete", "--filter"]. [] only bans.
+delete_command = ["ditto-relay", "delete", "--filter"]
