@@ -37,7 +37,7 @@ const NIP_28: std::ops::RangeInclusive<u64> = 40..=44;
 
 /// Domains that only spam links to. Subdomains count. Where the spammer is a
 /// tenant of a shared host, only their own subdomain is listed.
-const SPAM_DOMAINS: [&str; 8] = [
+const SPAM_DOMAINS: [&str; 10] = [
     // aéPiot. Its accounts post nothing but notes that hashtag every word
     // and link each phrase here, by the thousand a day from a rotating set
     // of keys, and the hashtag pages they create draw headless browsers. It
@@ -54,6 +54,11 @@ const SPAM_DOMAINS: [&str; 8] = [
     "crypto-guard.workers.dev",
     // "CALL_FOR_AIS" agent-recruitment posts, repeated.
     "diversz.lovable.app",
+    // "1 ETH airdrop" phishing, hundreds of notes a minute from throwaway
+    // keys, replying to people.
+    "evmverse.cc",
+    // "View Full Gallery" porn articles, a few from each of hundreds of keys.
+    "cbrop.com",
 ];
 
 /// Hashtags that mark an event as adult. Ditto Relay's defaults for its
@@ -73,6 +78,11 @@ pub fn judge(input: &Input) -> Verdict {
     }
     if names_spam_domain(&input.event.content) {
         return Verdict::Reject("blocked: links to spam sites are not allowed".into());
+    }
+    if crate::homoglyphs::disguised(input.event.kind, &input.event.content) {
+        return Verdict::Reject(
+            "blocked: words disguised with lookalike letters are not allowed".into(),
+        );
     }
     if crate::labels::flagged(&input.event) {
         return Verdict::Reject("blocked: this content is not allowed".into());
@@ -282,6 +292,8 @@ mod tests {
             "Get on the list. https://earningenterprises.com/c.php?s=CCH-79009",
             "Feed: https://sylunara-signals.crypto-guard.workers.dev/signals.json",
             "bootstrap: https://diversz.lovable.app/bootstrap.txt?source=nostr",
+            "🚨 1 ETH claim now: https://one.evmverse.cc/?ref=n1mci3",
+            "[View Full Gallery](https://go.cbrop.com/prse)",
         ] {
             assert!(
                 matches!(judge(&event(1, content)), Verdict::Reject(_)),
@@ -329,6 +341,16 @@ mod tests {
         ] {
             assert_eq!(judge(&event(1, content)), Verdict::Accept, "{content}");
         }
+    }
+
+    #[test]
+    fn blocks_disguised_words() {
+        assert_eq!(
+            judge(&event(1111, "🪂 AirdrОР ᎪlЕrΤ! Claim it")),
+            Verdict::Reject(
+                "blocked: words disguised with lookalike letters are not allowed".into()
+            )
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ mod concord;
 mod config;
 mod fetch;
 mod flood;
+mod homoglyphs;
 mod labels;
 mod nostr;
 mod policy;
