@@ -35,37 +35,6 @@ pub enum Verdict {
 /// messages, and muting users.
 const NIP_28: std::ops::RangeInclusive<u64> = 40..=44;
 
-/// Domains that only spam links to. Subdomains count. Where the spammer is a
-/// tenant of a shared host, only their own subdomain is listed.
-const SPAM_DOMAINS: [&str; 12] = [
-    // aéPiot. Its accounts post nothing but notes that hashtag every word
-    // and link each phrase here, by the thousand a day from a rotating set
-    // of keys, and the hashtag pages they create draw headless browsers. It
-    // links through generated subdomains too.
-    "aepiot.com",
-    "aepiot.ro",
-    "allgraph.ro",
-    "headlines-world.com",
-    // "Originality Apps" Gumroad promos, from dozens of keys.
-    "originality-start.surge.sh",
-    // Affiliate tracking links behind one-line platitudes.
-    "earningenterprises.com",
-    // A trading-signals bot that replies to people's posts.
-    "crypto-guard.workers.dev",
-    // "CALL_FOR_AIS" agent-recruitment posts, repeated.
-    "diversz.lovable.app",
-    // "1 ETH airdrop" phishing, hundreds of notes a minute from throwaway
-    // keys, replying to people: gweiportal.top from Nov 19 2026, then
-    // evmverse.cc.
-    "gweiportal.top",
-    "evmverse.cc",
-    // The same campaign's "free SOL drop" pitch, from Nov 26 2026: thousands
-    // of replies an hour from throwaway keys, and root notes they reply to.
-    "solhub.cc",
-    // "View Full Gallery" porn articles, a few from each of hundreds of keys.
-    "cbrop.com",
-];
-
 /// Hashtags that mark an event as adult. Ditto Relay's defaults for its
 /// `nsfw:` search extension, where they only mark media; here any event
 /// carrying one is refused.
@@ -74,14 +43,16 @@ const NSFW_HASHTAGS: [&str; 19] = [
     "tits", "pussy", "cock", "milf", "slut", "fetish", "hentai", "loli",
 ];
 
-pub fn judge(input: &Input) -> Verdict {
+/// Judge an event. `spam_domains` are the config's (`[spam] domains`): links
+/// to them, or to their subdomains, are refused.
+pub fn judge(input: &Input, spam_domains: &[String]) -> Verdict {
     if NIP_28.contains(&input.event.kind) {
         return Verdict::Reject("blocked: public chat is not allowed".into());
     }
     if input.event.kind == 1 && is_json_document(&input.event.content) {
         return Verdict::Reject("blocked: text notes must be text, not JSON".into());
     }
-    if names_spam_domain(&input.event.content) {
+    if names_spam_domain(&input.event.content, spam_domains) {
         return Verdict::Reject("blocked: links to spam sites are not allowed".into());
     }
     if crate::homoglyphs::disguised(input.event.kind, &input.event.content) {
@@ -147,14 +118,18 @@ fn is_json_document(text: &str) -> bool {
         && serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok()
 }
 
-/// Whether `text` names a spam domain or a subdomain of one, as a whole
-/// hostname: `x.aepiot.com` does, `notaepiot.com` doesn't.
-fn names_spam_domain(text: &str) -> bool {
+/// Whether `text` names one of `domains` or a subdomain of one, as a whole
+/// hostname: `x.aepiot.com` does, `notaepiot.com` doesn't. The domains are
+/// lowercase, as the config leaves them.
+fn names_spam_domain(text: &str, domains: &[String]) -> bool {
+    if domains.is_empty() {
+        return false;
+    }
     text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
         .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
         .any(|host| {
-            SPAM_DOMAINS.iter().any(|domain| {
-                host.strip_suffix(domain)
+            domains.iter().any(|domain| {
+                host.strip_suffix(domain.as_str())
                     .is_some_and(|rest| rest.is_empty() || rest.ends_with('.'))
             })
         })
@@ -163,6 +138,19 @@ fn names_spam_domain(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The domains the example config lists, which the tests judge against.
+    fn judge(input: &Input) -> Verdict {
+        let config = crate::config::Config::parse(include_str!("../ditto-policy.example.toml"))
+            .expect("the example config parses");
+        super::judge(input, &config.spam.domains)
+    }
+
+    #[test]
+    fn judges_no_domains_without_a_list() {
+        let input = event(1, "🚨 1 ETH claim now: https://one.evmverse.cc/?ref=n1mci3");
+        assert_eq!(super::judge(&input, &[]), Verdict::Accept);
+    }
 
     fn event(kind: u64, content: &str) -> Input {
         Input {
@@ -299,6 +287,7 @@ mod tests {
             "bootstrap: https://diversz.lovable.app/bootstrap.txt?source=nostr",
             "🚨 1 ETH claim now: https://one.evmverse.cc/?ref=n1mci3",
             "🔥 Free SOL Drop: Claim your reward! https://ai.solhub.cc/?ref=txhnco",
+            "💰 Check eligibility: AI Gas & Activity Airdrop! https://ai.evmnest.cc/?ref=kke73",
             "🎁 Huge giveaway: a temporary ETH airdrop event. Check eligibility here: https://gweiportal.top/?ref=42iaw7",
             "[View Full Gallery](https://go.cbrop.com/prse)",
         ] {

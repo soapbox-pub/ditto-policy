@@ -17,3 +17,37 @@ refresh_minutes = 30
 # Run with {"authors":["<pubkey>"]} appended, to delete a banned user's events.
 # strfry's is ["strfry", "delete", "--filter"]. [] only bans.
 delete_command = ["ditto-relay", "delete", "--filter"]
+
+[spam]
+# Domains that only spam links to: an event that links to one, or to a
+# subdomain of one, is refused. Where the spammer is a tenant of a shared
+# host, list only their own subdomain. Read again within seconds whenever
+# this file changes, without restarting anything. None, and no links are
+# refused for where they go.
+domains = [
+    # aéPiot. Its accounts post nothing but notes that hashtag every word and
+    # link each phrase here, by the thousand a day from a rotating set of
+    # keys, and the hashtag pages they create draw headless browsers. It
+    # links through generated subdomains too.
+    "aepiot.com",
+    "aepiot.ro",
+    "allgraph.ro",
+    "headlines-world.com",
+    # "Originality Apps" Gumroad promos, from dozens of keys.
+    "originality-start.surge.sh",
+    # Affiliate tracking links behind one-line platitudes.
+    "earningenterprises.com",
+    # A trading-signals bot that replies to people's posts.
+    "crypto-guard.workers.dev",
+    # "CALL_FOR_AIS" agent-recruitment posts, repeated.
+    "diversz.lovable.app",
+    # Airdrop phishing, thousands of replies an hour from throwaway keys,
+    # moving between domains: gweiportal.top from Nov 19 2026, then
+    # evmverse.cc, then solhub.cc and evmnest.cc on Nov 26.
+    "gweiportal.top",
+    "evmverse.cc",
+    "solhub.cc",
+    "evmnest.cc",
+    # "View Full Gallery" porn articles, a few from each of hundreds of keys.
+    "cbrop.com",
+]

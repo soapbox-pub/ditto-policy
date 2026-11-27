@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use bans::Bans;
 use blocklist::Blocklist;
-use config::Config;
+use config::{Config, Watched};
 use policy::{Floods, Input, Verdict};
 
 #[derive(Parser)]
@@ -107,17 +107,14 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         None => {
             // A bad config is reported, and the rest of the policy still runs.
-            let config = Config::load(&cli.config).unwrap_or_else(|err| {
-                eprintln!("ditto-policy: config not applied: {err:#}");
-                Config::default()
-            });
+            let mut watched = Watched::load(&cli.config);
             let mut plugin = Plugin {
                 db: cli.db,
                 bans: None,
                 failed: false,
                 blocklist: None,
             };
-            plugin.start_blocklist(&config);
+            plugin.start_blocklist(&watched.config);
             let mut floods =
                 (cli.flood_similar_authors > 0 || cli.flood_mention_authors > 0).then(|| {
                     Floods::new(flood::Options {
@@ -129,7 +126,14 @@ fn main() -> anyhow::Result<()> {
             run(
                 io::stdin().lock(),
                 io::stdout().lock(),
-                &mut |event| plugin.banned(event),
+                &mut |input| {
+                    watched.refresh();
+                    if plugin.banned(&input.event) {
+                        Verdict::Reject(BANNED.into())
+                    } else {
+                        policy::judge(input, &watched.config.spam.domains)
+                    }
+                },
                 floods.as_mut(),
             )?;
         }
@@ -205,10 +209,15 @@ impl Plugin {
     }
 }
 
+/// What a banned author is told.
+const BANNED: &str = "blocked: banned by this relay's operator";
+
+/// Answer each event on `input`, judged by `judge` (the bans and the
+/// policy), then, if it passes, by `floods`.
 fn run(
     mut input: impl BufRead,
     mut output: impl Write,
-    banned: &mut impl FnMut(&policy::Event) -> bool,
+    judge: &mut impl FnMut(&Input) -> Verdict,
     mut floods: Option<&mut Floods>,
 ) -> io::Result<()> {
     let mut line = String::new();
@@ -217,7 +226,7 @@ fn run(
         if input.read_line(&mut line)? == 0 {
             return output.flush();
         }
-        if let Some(answer) = answer(line.trim_end(), banned, floods.as_deref_mut()) {
+        if let Some(answer) = answer(line.trim_end(), judge, floods.as_deref_mut()) {
             serde_json::to_writer(&mut output, &answer)?;
             output.write_all(b"\n")?;
         }
@@ -238,7 +247,7 @@ struct Output {
 
 fn answer(
     line: &str,
-    banned: &mut impl FnMut(&policy::Event) -> bool,
+    judge: &mut impl FnMut(&Input) -> Verdict,
     floods: Option<&mut Floods>,
 ) -> Option<Output> {
     if line.is_empty() {
@@ -265,13 +274,9 @@ fn answer(
             });
         }
     };
-    let verdict = if banned(&input.event) {
-        Verdict::Reject("blocked: banned by this relay's operator".into())
-    } else {
-        match (policy::judge(&input), floods) {
-            (Verdict::Accept, Some(floods)) => floods.judge(&input.event, now()),
-            (verdict, _) => verdict,
-        }
+    let verdict = match (judge(&input), floods) {
+        (Verdict::Accept, Some(floods)) => floods.judge(&input.event, now()),
+        (verdict, _) => verdict,
     };
     let (action, msg) = match verdict {
         Verdict::Accept => ("accept", String::new()),
@@ -301,7 +306,13 @@ mod tests {
         run(
             input.as_bytes(),
             &mut out,
-            &mut |event: &policy::Event| event.pubkey == banned,
+            &mut |input: &Input| {
+                if input.event.pubkey == banned {
+                    Verdict::Reject(BANNED.into())
+                } else {
+                    policy::judge(input, &[])
+                }
+            },
             None,
         )
         .unwrap();
