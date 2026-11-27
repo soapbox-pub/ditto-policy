@@ -37,7 +37,7 @@ const NIP_28: std::ops::RangeInclusive<u64> = 40..=44;
 
 /// Domains that only spam links to. Subdomains count. Where the spammer is a
 /// tenant of a shared host, only their own subdomain is listed.
-const SPAM_DOMAINS: [&str; 11] = [
+const SPAM_DOMAINS: [&str; 12] = [
     // aéPiot. Its accounts post nothing but notes that hashtag every word
     // and link each phrase here, by the thousand a day from a rotating set
     // of keys, and the hashtag pages they create draw headless browsers. It
@@ -59,6 +59,9 @@ const SPAM_DOMAINS: [&str; 11] = [
     // evmverse.cc.
     "gweiportal.top",
     "evmverse.cc",
+    // The same campaign's "free SOL drop" pitch, from Nov 26 2026: thousands
+    // of replies an hour from throwaway keys, and root notes they reply to.
+    "solhub.cc",
     // "View Full Gallery" porn articles, a few from each of hundreds of keys.
     "cbrop.com",
 ];
@@ -295,6 +298,7 @@ mod tests {
             "Feed: https://sylunara-signals.crypto-guard.workers.dev/signals.json",
             "bootstrap: https://diversz.lovable.app/bootstrap.txt?source=nostr",
             "🚨 1 ETH claim now: https://one.evmverse.cc/?ref=n1mci3",
+            "🔥 Free SOL Drop: Claim your reward! https://ai.solhub.cc/?ref=txhnco",
             "🎁 Huge giveaway: a temporary ETH airdrop event. Check eligibility here: https://gweiportal.top/?ref=42iaw7",
             "[View Full Gallery](https://go.cbrop.com/prse)",
         ] {
